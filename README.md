@@ -3,6 +3,11 @@ To build the driver, use:
 make build
 ```
 
+Modinfo shortcut:
+```
+make info
+```
+
 Installing with insmod:
 ```
 make install
