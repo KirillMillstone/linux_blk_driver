@@ -6,7 +6,7 @@ KERNEL := $(shell uname -r)
 
 obj-m := $(TARGET).o
 
-all:
+build:
 	$(MAKE) -C /lib/modules/$(KERNEL)/build M=$(PWD) modules
 
 install:
