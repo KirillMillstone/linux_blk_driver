@@ -18,6 +18,9 @@ install:
 show:
 	@sudo lsmod | grep $(TARGET) || true
 
+msg:
+	@sudo dmesg
+
 uninstall:
 	@sudo rmmod $(TARGET)
 

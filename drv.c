@@ -44,22 +44,26 @@ Group types:
 struct task_struck + list_head + atomic + mutex
 
 */
+#define DBGMSG(fmt, ...) printk(DEVICE_NAME": "fmt,##__VA_ARGS__)
 
 static int my_block_open(struct gendisk *disk, blk_mode_t mode)
 {
+    printk("OPEN called\n");
     return 0;
 }
 
 static void my_block_release(struct gendisk *gd)
 {
+    printk("RELEASE called\n");
     return;
 }
 
 static blk_status_t my_block_request(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
+    printk("REQUEST called\n");
     return BLK_STS_OK;
 }
-
+ 
 struct blk_mq_tag_set tag_set;
 struct request_queue *queue;
 struct gendisk *disk;
@@ -77,6 +81,8 @@ static int block_major; // Number will be allocated after calling register_blkde
 
 static int __init drv_block_init(void)
 {
+    printk(MY_BLKDEV_NAME ": Test module init begin\n");
+
     block_major = register_blkdev(block_major, MY_BLKDEV_NAME);
     if (block_major < 0) {
         printk(KERN_ERR "Unable to register custom block device\n");
@@ -90,13 +96,17 @@ static int __init drv_block_init(void)
         return -ENOMEM;
     }
 
+    printk(MY_BLKDEV_NAME ": Disk allocated\n");
+
     disk->major = block_major;
     disk->first_minor = 0;
     disk->minors = 1;
     disk->flags = GENHD_FL_NO_PART;
     disk->fops = &dops;
     strscpy(disk->disk_name, "blkdrv", sizeof(disk->disk_name));
-    set_capacity(disk, MY_BLK_SECT);
+    set_capacity(disk, 1);
+
+    printk(MY_BLKDEV_NAME ": Capacity set. Begin to initialize set\n");
 
     memset(&tag_set, 0, sizeof(tag_set));
     tag_set.ops = &my_queue_ops;
@@ -106,6 +116,8 @@ static int __init drv_block_init(void)
     tag_set.cmd_size = 0;
     tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 
+    printk(MY_BLKDEV_NAME ": Set initilazied. Begin to alloc tag set\n");
+
     int err = blk_mq_alloc_tag_set(&tag_set);
     if (err) {
         printk(KERN_ERR "Failed to allocate tag set\n");
@@ -113,19 +125,31 @@ static int __init drv_block_init(void)
         return -ENOMEM;
     }
 
+    printk(MY_BLKDEV_NAME ": Init queue begin\n");
+
     queue = blk_mq_init_queue(&tag_set);
 
     if (IS_ERR(queue)) {
+        printk(KERN_ERR "Failed to init queue\n");
         blk_mq_free_tag_set(&tag_set);
         put_disk(disk);
         unregister_blkdev(block_major, MY_BLKDEV_NAME);
         return PTR_ERR(queue);
     }
 
+    printk(MY_BLKDEV_NAME ": Init queue end\n");
+
     blk_queue_logical_block_size(queue, 512);
     blk_queue_physical_block_size(queue, 512);
 
+    printk(MY_BLKDEV_NAME ": Logical and physical size set. Assign queue to disk\n");
+
     disk->queue = queue;
+
+    printk(MY_BLKDEV_NAME ": Disk fields initialized\n");
+    printk("  major=%d, minors=%d\n", disk->major, disk->minors);
+    printk("  flags=%lu, queue=%px\n", disk->flags, disk->queue);
+    printk("  fops=%px\n", disk->fops);
 
     err = add_disk(disk);
     if (err) {
@@ -137,12 +161,14 @@ static int __init drv_block_init(void)
         return err;
     }
 
-    printk("Test module initialized: %d\n", block_major);
+    printk(MY_BLKDEV_NAME ": Test module initialized: %d\n", block_major);
     return 0;
 }
 
 static void __exit drv_block_exit(void)
 {
+    printk(MY_BLKDEV_NAME ": Test module exit begin\n");
+
     if (disk) {
         del_gendisk(disk);
 
@@ -161,7 +187,7 @@ static void __exit drv_block_exit(void)
         block_major = 0;
     }
 
-    printk("Test module exit called\n");
+    printk(MY_BLKDEV_NAME ": Test module exit called\n");
 }
 
 module_init(drv_block_init);
