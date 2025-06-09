@@ -2,8 +2,8 @@
 #include <linux/blkdev.h>
 #include <linux/blk-mq.h>
 #include <linux/genhd.h>
+#include "drv.h"
 
-#define MY_BLKDEV_NAME  "zhernov_blk_6"
 #define NR_SECTORS      512
 
 MODULE_LICENSE("Dual MIT/GPL");
@@ -12,27 +12,6 @@ MODULE_VERSION("6");
 MODULE_DESCRIPTION("Kernel module that will earn me za4et");
 
 /*
-open, release, ioctl
-
-IOCTL_CREATE_THREAD
-IOCTL_RUN_THREAD
-IOCTL_START_THREAD_BY_ID
-IOCTL_START_THREADS
-IOCTL_TERMINATE_THREAD_BY_ID
-IOCTL_TERMINATE_GROUP_THREADS
-IOCTL_TERMINATE_ALL_THREADS
-IOCTL_CNT_THREADS
-IOCTL_CNT_RUNNING_THREADS
-IOCTL_CNT_CREATED_THREADS
-IOCTL_CNT_TERMINATED_THREADS
-IOCTL_CNT_THREADS_IN_GROUP
-IOCTL_CNT_RUNNING_THREADS_IN_GROUP
-IOCTL_CNT_CREATED_THREADS_IN_GROUP
-IOCTL_CNT_TERMINATED_THREADS_IN_GROUP
-IOCTL_GET_SHARED_VARIABLE_VALUE
-IOCTL_THREADS_INFO
-IOCTL_DBG_MSG_THREADS_INFO
-
 Group types:
 *   Without synch
 *   Mutex
@@ -42,15 +21,6 @@ Group types:
 struct task_struck + list_head + atomic + mutex
 
 */
-
-// struct blk_mq_tag_set tag_set;
-// struct request_queue *queue;
-// struct gendisk *disk;
-// struct block_device_operations dops = {
-    // .owner = THIS_MODULE,
-    // .open = my_block_open,
-    // .release = my_block_release
-// };
 
 static int block_major; // Number will be allocated after calling register_blkdev
 
@@ -65,11 +35,28 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
     printk(MY_BLKDEV_NAME ": Device released\n");
 }
 
+static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
+{
+    int ret;
+    // struct my_device *dev = bdev->bd_disk->private_data;
+
+    switch (cmd) {
+        case IOCTL_START_THREADS:
+            printk(MY_BLKDEV_NAME ": IOCTL recieved");
+            ret = 0;
+            break;
+        default:
+            ret = -ENOTTY;
+            break;
+    }
+
+    return ret;
+}
+
 /*
 *   Main structure
 */
 static struct my_device {
-    // spinlock_t lock;     I guess we don't need that
     struct blk_mq_tag_set tag_set;
     struct request_queue *queue;
     struct gendisk *gd;
@@ -89,7 +76,9 @@ static const struct blk_mq_ops my_queue_ops = {
 struct block_device_operations my_block_ops = {
     .owner = THIS_MODULE,
     .open = my_block_open,
-    .release = my_block_release
+    .release = my_block_release,
+    .ioctl = my_block_ioctl,
+    .compat_ioctl = my_block_ioctl,
 };
 
 /*

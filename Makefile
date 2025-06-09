@@ -12,6 +12,9 @@ build:
 info:
 	@sudo modinfo $(TARGET).ko
 
+dmsg:
+	@sudo dmesg | tail
+
 install:
 	@sudo insmod $(TARGET).ko
 
