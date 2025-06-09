@@ -16,7 +16,7 @@ dmsg:
 	@sudo dmesg | tail
 
 install:
-	@sudo insmod $(TARGET).ko
+	@sudo insmod $(TARGET).ko init_shared_vars=4,3,2,1
 
 show:
 	@sudo lsmod | grep $(TARGET) || true
