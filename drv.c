@@ -9,17 +9,6 @@ MODULE_DESCRIPTION("Kernel module that will earn me za4et");
 module_param_array(init_shared_vars, int, &init_shared_cnt, 0);
 MODULE_PARM_DESC(init_shared_vars, "Array of integer shared variables for each group. Usage: init_shared_vars=1,2,3,4");
 
-/*
-Group types:
-*   Without synch
-*   Mutex
-*   Bin semaphore
-*   Spin-lock
-
-struct task_struck + list_head + atomic + mutex
-
-*/
-
 static int block_major; // Number will be allocated after calling register_blkdev
 
 static int my_block_open(struct block_device *bdev, fmode_t mode)
@@ -33,64 +22,10 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
     printk(MY_BLKDEV_NAME ": Device released\n");
 }
 
-int thread_func(void* data) {
-    // blk_thread_t* thread = (blk_thread_t *)data;
-    DBGMSG("Yahooooo!");
-    return 0;
-}
+// int thread_func(void* data)
+// {
 
-static blk_thread_t* create_thread(group_type_t type, bool start)
-{
-    thread_group_t* group = &groups[type];
-    blk_thread_t* thread = kzalloc(sizeof(blk_thread_t), GFP_KERNEL);
-    if (!thread)
-        return NULL;
-
-    INIT_LIST_HEAD(&thread->list);
-    thread->group_type = type;
-    thread->pshared_var = &group->shared_var;
-    thread->state = CREATED;
-    thread->global_id = atomic_inc_return(&group->created_count);
-
-    thread->task = kthread_create(thread_func, thread, "blk_thread_%u", thread->global_id);
-    if (IS_ERR(thread->task)) {
-        kfree(thread);
-        return NULL;
-    }
-
-    mutex_lock(&group->list_mutex);
-    list_add_tail(&thread->list, &group->thread_list);
-    mutex_unlock(&group->list_mutex);
-    
-    if (start) {
-        int ret = wake_up_process(thread->task);
-        if (ret) {
-            kfree(thread);
-            return NULL;
-        }
-    }
-
-    return thread;
-}
-
-// IOCTL_CREATE_THREAD
-// IOCTL_RUN_THREAD
-// IOCTL_START_THREAD_BY_ID
-// IOCTL_START_THREADS
-// IOCTL_TERMINATE_THREAD_BY_ID
-// IOCTL_TERMINATE_GROUP_THREADS
-// IOCTL_TERMINATE_ALL_THREADS
-// IOCTL_CNT_THREADS
-// IOCTL_CNT_RUNNING_THREADS
-// IOCTL_CNT_CREATED_THREADS
-// IOCTL_CNT_TERMINATED_THREADS
-// IOCTL_CNT_THREADS_IN_GROUP
-// IOCTL_CNT_RUNNING_THREADS_IN_GROUP
-// IOCTL_CNT_CREATED_THREADS_IN_GROUP
-// IOCTL_CNT_TERMINATED_THREADS_IN_GROUP
-// IOCTL_GET_SHARED_VARIABLE_VALUE
-// IOCTL_THREADS_INFO
-// IOCTL_DBG_MSG_THREADS_INFO
+// }
 
 static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
 {
@@ -98,27 +33,36 @@ static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int 
     th_create_params_t th_create_params;
     th_info_t thread_info;
 
-    switch (cmd) {
-        case IOCTL_CREATE_THREAD:
-            DBGMSG("Processing IOCTL_CREATE_THREAD\n");
+    switch (cmd)
+    {
+    case IOCTL_CREATE_THREAD:
+        printk(MY_BLKDEV_NAME ": IOCTL recieved\n");
+        copy_from_user(&th_create_params, (th_create_params_t __user *)arg, sizeof(th_create_params));
+        printk(MY_BLKDEV_NAME ": Create params: {start = %d, group_id = %d}\n", th_create_params.start, th_create_params.group_id);
+        blk_thread_t* th = kmalloc(sizeof(blk_thread_t), GFP_KERNEL);
+        th->state = CREATED;
+        list_add_tail(&th->thread_node, &groups[th_create_params.group_id].thread_head);
 
-            ret = copy_from_user(&th_create_params, (th_create_params_t __user *)arg, sizeof(th_create_params_t));
-
-            if (ret) {
-                DBGMSG("Failed to copy from user.\n");
-                ret = -EFAULT;
-                break;
+        int i;
+        for (i = 0; i < N_GROUPS; i++) {
+            if (!list_empty(&groups[i].thread_head)) {
+                struct list_head* curr;
+                list_for_each(curr, &groups[i].thread_head) {
+                    blk_thread_t* tp = list_entry(curr, blk_thread_t, thread_node);
+                    printk(MY_BLKDEV_NAME ": %d\n", tp->state);
+                }
             }
-
-            blk_thread_t *thread = create_thread(th_create_params.group_id, th_create_params.start);
-            if (!thread) {
-                DBGMSG("Failed to create thread\n");
-                ret = -ENOMEM;
-                break;
+            else {
+                printk(MY_BLKDEV_NAME ": List %d is empty\n", i);
             }
-            break;  // IOCTL_CREATE_THREAD
+        }
+
+        break;
+    
+    default:
+        printk(KERN_ERR MY_BLKDEV_NAME ": Unknown IOCTL\n");
+        break;
     }
-
     return ret;
 }
 
@@ -152,20 +96,14 @@ struct block_device_operations my_block_ops = {
 
 static void groups_init(void)
 {
-    // Init shared variables values
     int i;
     for (i = 0; i < N_GROUPS; i++) {
-        if (i < init_shared_cnt)
-            shared_vars[i] = init_shared_vars[i];
-        else
-            shared_vars[i] = 0;
-    }
+        INIT_LIST_HEAD(&groups[i].thread_head);
 
-    INIT_LIST_HEAD(&groups[i].thread_list);
-    mutex_init(&groups[i].list_mutex);
-    atomic_set(&groups[i].created_count, 0);
-    atomic_set(&groups[i].running_count, 0);
-    atomic_set(&groups[i].terminated_count, 0);
+        if (list_empty(&groups[i].thread_head)) {
+            printk(MY_BLKDEV_NAME ": Group list %d initialized and empty\n", i);
+        }
+    }
 }
 
 /*
@@ -237,17 +175,17 @@ static int __init drv_block_init(void)
 static void cleanup_threads(void)
 {
     int i;
-    blk_thread_t *thread, *tmp;
-
     for (i = 0; i < N_GROUPS; i++) {
-        mutex_lock(&groups[i].list_mutex);
-        list_for_each_entry_safe(thread, tmp, &groups[i].thread_list, list) {
-            if (thread->state == RUNNING)
-                kthread_stop(thread->task);
-            list_del(&thread->list);
-            kfree(thread);
+
+        if (list_empty(&groups[i].thread_head)) {
+            printk(KERN_INFO "Group %d already empty\n", i);
+            continue;
         }
-        mutex_unlock(&groups[i].list_mutex);
+
+        blk_thread_t *curr, *tmp;
+        list_for_each_entry_safe(curr, tmp, &groups[i].thread_head, thread_node) {
+            list_del_init(&curr->thread_node);
+        }
     }
 }
 

@@ -9,7 +9,7 @@ typedef enum {
 
 typedef struct {
     group_type_t group_id;
-    bool start;
+    int start;
 } th_create_params_t;
 
 typedef struct {

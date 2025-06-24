@@ -8,8 +8,8 @@
 #include <linux/mutex.h>
 #include <linux/semaphore.h>
 #include <linux/spinlock.h>
+#include <linux/delay.h>
 #include "shared_interface.h"
-
 
 #define MY_BLKDEV_NAME      "zhernov_blk_6"
 #define BLKDRV_MAGIC        (0xFC)
@@ -26,17 +26,17 @@ typedef enum {
 } th_state_t;
 
 typedef struct {
-    struct list_head list;
-    struct task_struct* task;
-    group_type_t group_type;
-    unsigned int global_id;
+    struct list_head thread_node;
+    // struct task_struct* task;
+    // group_type_t group_type;
+    // unsigned int global_id;
     th_state_t state;
-    void* synch_obj;
-    int* pshared_var;
+    // void* synch_obj;
+    // int* pshared_var;
 } blk_thread_t;
 
 typedef struct {
-    struct list_head thread_list;
+    struct list_head thread_head;
     struct mutex list_mutex;
     int shared_var;
     atomic_t created_count;
