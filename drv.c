@@ -26,6 +26,10 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
 // {
 
 // }
+// int thread_func(void* data)
+// {
+
+// }
 
 static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
 {
@@ -33,6 +37,36 @@ static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int 
     th_create_params_t th_create_params;
     th_info_t thread_info;
 
+    switch (cmd)
+    {
+    case IOCTL_CREATE_THREAD:
+        printk(MY_BLKDEV_NAME ": IOCTL recieved\n");
+        copy_from_user(&th_create_params, (th_create_params_t __user *)arg, sizeof(th_create_params));
+        printk(MY_BLKDEV_NAME ": Create params: {start = %d, group_id = %d}\n", th_create_params.start, th_create_params.group_id);
+        blk_thread_t* th = kmalloc(sizeof(blk_thread_t), GFP_KERNEL);
+        th->state = CREATED;
+        list_add_tail(&th->thread_node, &groups[th_create_params.group_id].thread_head);
+
+        int i;
+        for (i = 0; i < N_GROUPS; i++) {
+            if (!list_empty(&groups[i].thread_head)) {
+                struct list_head* curr;
+                list_for_each(curr, &groups[i].thread_head) {
+                    blk_thread_t* tp = list_entry(curr, blk_thread_t, thread_node);
+                    printk(MY_BLKDEV_NAME ": %d\n", tp->state);
+                }
+            }
+            else {
+                printk(MY_BLKDEV_NAME ": List %d is empty\n", i);
+            }
+        }
+
+        break;
+    
+    default:
+        printk(KERN_ERR MY_BLKDEV_NAME ": Unknown IOCTL\n");
+        break;
+    }
     switch (cmd)
     {
     case IOCTL_CREATE_THREAD:
@@ -103,7 +137,23 @@ static void groups_init(void)
         if (list_empty(&groups[i].thread_head)) {
             printk(MY_BLKDEV_NAME ": Group list %d initialized and empty\n", i);
         }
+
+        // Init counters & shared vars
+        groups[i].created_count = 0;
+        groups[i].running_count = 0;
+        groups[i].terminated_count = 0;
+        groups[i].shared_var = init_shared_vars[i];
+
+        printk(MY_BLKDEV_NAME ": Group list %d initial shared var: %d\n", i, groups[i].shared_var);
+
+        // Thread list protection mutex
+        mutex_init(&groups[i].list_mutex);
     }
+
+    // Synch objects for groups
+    mutex_init(&group_mutex);
+    sema_init(&group_sem, 1);
+    spin_lock_init(&group_spinlock);
 }
 
 /*
@@ -176,6 +226,15 @@ static void cleanup_threads(void)
 {
     int i;
     for (i = 0; i < N_GROUPS; i++) {
+
+        if (list_empty(&groups[i].thread_head)) {
+            printk(KERN_INFO "Group %d already empty\n", i);
+            continue;
+        }
+
+        blk_thread_t *curr, *tmp;
+        list_for_each_entry_safe(curr, tmp, &groups[i].thread_head, thread_node) {
+            list_del_init(&curr->thread_node);
 
         if (list_empty(&groups[i].thread_head)) {
             printk(KERN_INFO "Group %d already empty\n", i);

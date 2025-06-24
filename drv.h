@@ -17,7 +17,10 @@
 
 int init_shared_cnt = 0;
 int init_shared_vars[N_GROUPS] = {};
-int shared_vars[N_GROUPS] = {};
+// int shared_vars[N_GROUPS] = {};
+static struct mutex group_mutex;
+static struct semaphore group_sem;
+static spinlock_t group_spinlock;
 
 typedef enum {
     CREATED,
@@ -39,9 +42,9 @@ typedef struct {
     struct list_head thread_head;
     struct mutex list_mutex;
     int shared_var;
-    atomic_t created_count;
-    atomic_t running_count;
-    atomic_t terminated_count;
+    unsigned int created_count;
+    unsigned int running_count;
+    unsigned int terminated_count;
 } thread_group_t;
 
 static thread_group_t groups[N_GROUPS];
