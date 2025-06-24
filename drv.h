@@ -30,12 +30,12 @@ typedef enum {
 
 typedef struct {
     struct list_head thread_node;
-    // struct task_struct* task;
-    // group_type_t group_type;
-    // unsigned int global_id;
+    struct task_struct* task;
+    group_type_t group_type;
+    unsigned int global_id;
     th_state_t state;
-    // void* synch_obj;
-    // int* pshared_var;
+    void* synch_obj;
+    int* pshared_var;
 } blk_thread_t;
 
 typedef struct {
