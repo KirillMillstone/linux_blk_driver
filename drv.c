@@ -1,5 +1,48 @@
 #include "drv.h"
 
+MODULE_LICENSE("Dual MIT/GPL");
+MODULE_AUTHOR("Zhernov Kirill");
+MODULE_VERSION("6");
+MODULE_DESCRIPTION("Kernel module that will earn me za4et");
+
+static struct my_device {
+    struct blk_mq_tag_set tag_set;
+    struct request_queue *queue;
+    struct gendisk *gd;
+} dev;
+
+// "Forward" declaration
+static int my_block_open(struct block_device *bdev, fmode_t mode);
+static void my_block_release(struct gendisk *gd, fmode_t mode);
+static void cleanup_threads(void);
+static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg);
+static blk_status_t my_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd);
+
+static const struct blk_mq_ops my_queue_ops = {
+    .queue_rq = my_queue_rq,
+};
+
+struct block_device_operations my_block_ops = {
+    .owner = THIS_MODULE,
+    .open = my_block_open,
+    .release = my_block_release,
+    .ioctl = my_block_ioctl,
+    .compat_ioctl = my_block_ioctl,
+};
+
+int init_shared_cnt = 0;
+int init_shared_vars[N_GROUPS] = {};
+static int block_major; // Number will be allocated after calling register_blkdev
+
+static struct mutex group_mutex;
+static struct semaphore group_sem;
+static spinlock_t group_spinlock;
+static unsigned int thread_cnt;
+static thread_group_t groups[N_GROUPS];
+
+module_param_array(init_shared_vars, int, &init_shared_cnt, 0);
+MODULE_PARM_DESC(init_shared_vars, "Array of integer shared variables for each group. Usage: init_shared_vars=1,2,3,4");
+
 static int my_block_open(struct block_device *bdev, fmode_t mode)
 {
     printk(MY_BLKDEV_NAME ": Device opened\n");

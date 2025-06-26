@@ -1,4 +1,4 @@
-#define N_GROUPS    (4)
+#define N_GROUPS            (4)
 #define MY_BLKDEV_NAME      "zhernov_blk_6"
 #define BLKDRV_MAGIC        (0xFC)
 
