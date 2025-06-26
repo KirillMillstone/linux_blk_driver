@@ -301,33 +301,9 @@ static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int 
         }
         break;
     case IOCTL_TERMINATE_ALL_THREADS:
-        // for (i = 0; i < N_GROUPS; i++) {
-        //     struct list_head temp_list;
-        //     INIT_LIST_HEAD(&temp_list);
-
-        //     mutex_lock(&groups[i].list_mutex);
-        //     list_splice_init(&groups[i].thread_head, &temp_list);
-        //     mutex_unlock(&groups[i].list_mutex);
-
-        //     struct list_head *pos, *n;
-        //     list_for_each_safe(pos, n, &temp_list) {
-        //         blk_thread_t *curr = list_entry(pos, blk_thread_t, thread_node);
-        //         list_del(pos);
-
-        //         if (curr->task && (curr->state == RUNNING)) {
-        //             kthread_stop(curr->task);
-        //         }
-        //         else if (curr->task && (curr->state == CREATED)) {
-        //             groups[type].created_count--;
-        //             groups[type].terminated_count++;
-        //             kthread_stop(curr->task);
-        //         }
-
-        //         kfree(curr);
-        //     }
-        // }
         cleanup_threads();
         break;
+
     case IOCTL_CNT_THREADS:
         for (i = 0; i < N_GROUPS; i++) {
             mutex_lock(&groups[i].list_mutex);
