@@ -1,4 +1,6 @@
 #define N_GROUPS    (4)
+#define MY_BLKDEV_NAME      "zhernov_blk_6"
+#define BLKDRV_MAGIC        (0xFC)
 
 typedef enum {
     GR_NOSYNCH,
@@ -9,6 +11,7 @@ typedef enum {
 
 typedef struct {
     group_type_t group_id;
+    int global_id;
     int start;
 } th_create_params_t;
 
@@ -21,12 +24,12 @@ typedef struct {
     unsigned int th_gr_terminated[N_GROUPS];
 } th_info_t;
 
-#define IOCTL_CREATE_THREAD                     _IOW    (BLKDRV_MAGIC, 0xb0, group_type_t) 
-#define IOCTL_RUN_THREAD                        _IOW    (BLKDRV_MAGIC, 0xb1, group_type_t)
+#define IOCTL_CREATE_THREAD                     _IOWR   (BLKDRV_MAGIC, 0xb0, th_create_params_t) 
+#define IOCTL_RUN_THREAD                        _IOWR   (BLKDRV_MAGIC, 0xb1, th_create_params_t)
 #define IOCTL_START_THREAD_BY_ID                _IOW    (BLKDRV_MAGIC, 0xb2, int)
 #define IOCTL_START_THREADS                     _IO     (BLKDRV_MAGIC, 0xb3)
 #define IOCTL_TERMINATE_THREAD_BY_ID            _IOW    (BLKDRV_MAGIC, 0xb4, int)
-#define IOCTL_TERMINATE_GROUP_THREADS           _IOW    (BLKDRV_MAGIC, 0xb5, int)
+#define IOCTL_TERMINATE_GROUP_THREADS           _IOW    (BLKDRV_MAGIC, 0xb5, group_type_t)
 #define IOCTL_TERMINATE_ALL_THREADS             _IO     (BLKDRV_MAGIC, 0xb6)
 #define IOCTL_CNT_THREADS                       _IOR    (BLKDRV_MAGIC, 0xb7, int)
 #define IOCTL_CNT_RUNNING_THREADS               _IOR    (BLKDRV_MAGIC, 0xb8, int)

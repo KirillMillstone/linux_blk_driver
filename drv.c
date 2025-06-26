@@ -1,16 +1,5 @@
 #include "drv.h"
 
-#define NR_SECTORS      512
-
-MODULE_LICENSE("Dual MIT/GPL");
-MODULE_AUTHOR("Zhernov Kirill");
-MODULE_VERSION("6");
-MODULE_DESCRIPTION("Kernel module that will earn me za4et");
-module_param_array(init_shared_vars, int, &init_shared_cnt, 0);
-MODULE_PARM_DESC(init_shared_vars, "Array of integer shared variables for each group. Usage: init_shared_vars=1,2,3,4");
-
-static int block_major; // Number will be allocated after calling register_blkdev
-
 static int my_block_open(struct block_device *bdev, fmode_t mode)
 {
     printk(MY_BLKDEV_NAME ": Device opened\n");
@@ -24,23 +13,61 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
 
 int thread_func(void* data)
 {
-    blk_thread_t* curr_th = (blk_thread_t*)data; 
-    printk(MY_BLKDEV_NAME ": Thread woken up. Pid: %d. Group id: %d\n", curr_th->global_id, curr_th->group_type);
+    blk_thread_t* curr_th = (blk_thread_t*)data;
+    group_type_t type = curr_th->group_type;
+    int pid = curr_th->global_id;
+    void* synch_obj = curr_th->synch_obj;
+    int* pshared_var = curr_th->pshared_var;
+    printk(MY_BLKDEV_NAME ": Thread woken up. Pid: %d. Group %d. Shared var: %d\n", pid, type, *pshared_var);
 
-    mutex_lock(&groups[curr_th->group_type].list_mutex);
-    groups[curr_th->group_type].running_count--;
-    groups[curr_th->group_type].terminated_count++;
+    while(!kthread_should_stop()) {
+        switch (type)
+        {
+        case GR_NOSYNCH:
+            (*pshared_var)++;
+            break;
+        case GR_MUTEX:
+            mutex_lock((struct mutex *)synch_obj);
+            (*pshared_var)++;
+            mutex_unlock((struct mutex *)synch_obj);
+            break;
+        case GR_SEM:
+            down((struct semaphore *)synch_obj);
+            (*pshared_var)++;
+            up((struct semaphore *)synch_obj);
+            break;
+        case GR_SPIN:
+            spin_lock((spinlock_t *)synch_obj);
+            (*pshared_var)++;
+            spin_unlock((spinlock_t *)synch_obj);
+            break;
+        }
+        if (kthread_should_stop()) {
+            printk(MY_BLKDEV_NAME ": Thread should stop recieved\n");
+            break;
+        }
+        msleep(10);
+    }
+
+    mutex_lock(&groups[type].list_mutex);
+    groups[type].running_count--;
+    groups[type].terminated_count++;
     curr_th->state = TERMINATED;
-    mutex_unlock(&groups[curr_th->group_type].list_mutex);
+    mutex_unlock(&groups[type].list_mutex);
 
-    printk(MY_BLKDEV_NAME ": Thread terminated. Pid: %d. Group id: %d\n", curr_th->global_id, curr_th->group_type);
+    printk(MY_BLKDEV_NAME ": Thread terminated. Pid: %d. Group %d. Shared var: %d\n", pid, type, *pshared_var);
 
     return 0;
 }
 
-static void blk_create_thread(th_create_params_t params)
+// Create blk_thread
+static int blk_create_thread(th_create_params_t params)
 {
     blk_thread_t* new_th = kmalloc(sizeof(blk_thread_t), GFP_KERNEL);
+    if (new_th == NULL) {
+        printk(KERN_ERR MY_BLKDEV_NAME " Failed to allocate memory for thread\n");
+        return -1;
+    }
     new_th->global_id = thread_cnt; // Update global variable after adding thread to list
     new_th->group_type = params.group_id;
     new_th->state = CREATED;    // NOT running
@@ -55,7 +82,7 @@ static void blk_create_thread(th_create_params_t params)
     if (IS_ERR(new_th->task)) {
         printk(KERN_ERR MY_BLKDEV_NAME " kthread_create failed\n");
         kfree(new_th);
-        return;
+        return -1;
     }
 
     mutex_lock(&groups[params.group_id].list_mutex);
@@ -63,7 +90,7 @@ static void blk_create_thread(th_create_params_t params)
     mutex_unlock(&groups[params.group_id].list_mutex);
 
     new_th->global_id = new_th->task->pid;
-    printk(MY_BLKDEV_NAME ": Thread created. Pid: %d. Group id: %d\n", new_th->global_id, new_th->group_type);
+    printk(MY_BLKDEV_NAME ": Thread created. Pid: %d. Group %d\n", new_th->global_id, new_th->group_type);
 
     // Add node to group list
     mutex_lock(&groups[params.group_id].list_mutex);
@@ -73,7 +100,7 @@ static void blk_create_thread(th_create_params_t params)
 
     mutex_unlock(&groups[params.group_id].list_mutex);
 
-    if (params.start && new_th->state == CREATED) {
+    if (params.start && (new_th->state == CREATED)) {
         mutex_lock(&groups[params.group_id].list_mutex);
 
         new_th->state = RUNNING;
@@ -84,42 +111,391 @@ static void blk_create_thread(th_create_params_t params)
 
         mutex_unlock(&groups[params.group_id].list_mutex);
     }
+
+    return new_th->global_id;
 }
 
 static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
 {
     int copy_ret = 0;
     th_create_params_t th_create_params;
-    th_info_t thread_info;
+    th_info_t thread_info = {};
     group_type_t type;
+    int thread_id = 0;  // ID from user
+    int i = 0;
+
+    int th_active_cnt = 0;
+    int th_running_cnt = 0;
+    int th_created_cnt = 0;
+    int th_terminated_cnt = 0;
+
+    int shared_var_user = 0;
 
     switch (cmd)
     {
     case IOCTL_RUN_THREAD:
     case IOCTL_CREATE_THREAD:
 
-        copy_ret = copy_from_user(&th_create_params, (group_type_t __user *)arg, sizeof(type));
+        // Get group type from user
+        copy_ret = copy_from_user(&th_create_params, (th_create_params_t __user *)arg, sizeof(th_create_params_t));
 
         if(copy_ret) {
             printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
             return -EFAULT;
         }
 
+        // Create or create & run thread based on IOCTL
         th_create_params.start = cmd == IOCTL_RUN_THREAD ? 1 : 0;
-
-        th_create_params.group_id = type;
-
-        printk(MY_BLKDEV_NAME ": Create params: {start = %d, group_id = %d}\n", th_create_params.start, th_create_params.group_id);
 
         if (!(0 <= th_create_params.group_id && th_create_params.group_id < N_GROUPS)) {
             printk(MY_BLKDEV_NAME ": Invalid group ID %d\n", th_create_params.group_id);
             return -EINVAL;
         }
 
-        blk_create_thread(th_create_params);
+        // Get id
+        th_create_params.global_id = blk_create_thread(th_create_params);
+        if (th_create_params.global_id == -1) {
+            return -EFAULT;
+        }
+
+        // Return thread id to user
+        copy_ret = copy_to_user((th_create_params_t __user *)arg, &th_create_params, sizeof(th_create_params_t));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        break;
+
+    case IOCTL_START_THREAD_BY_ID:
+
+        copy_ret = copy_from_user(&thread_id, (int __user *)arg, sizeof(int));
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+
+        // Find this thread
+        // Could use find find_task_by_vpid, but we need to update thread counters and thread state.
+        for (i = 0; i < N_GROUPS; i++) {
+            blk_thread_t *curr;
+            list_for_each_entry(curr, &groups[i].thread_head, thread_node) {
+                if ((curr->state == CREATED) && (curr->global_id == thread_id)) {
+
+                    mutex_lock(&groups[i].list_mutex);
+                    curr->state = RUNNING;
+                    groups[i].created_count--;
+                    groups[i].running_count++;
+
+                    wake_up_process(curr->task);
+
+                    mutex_unlock(&groups[i].list_mutex);
+                }
+            }
+        }
+        break;
+
+    case IOCTL_START_THREADS:
+        // Basically, same as previous, but for all threads;
+        for (i = 0; i < N_GROUPS; i++) {
+            blk_thread_t *curr;
+            list_for_each_entry(curr, &groups[i].thread_head, thread_node) {
+                if (curr->state == CREATED) {
+
+                    mutex_lock(&groups[i].list_mutex);
+                    curr->state = RUNNING;
+                    groups[i].created_count--;
+                    groups[i].running_count++;
+
+                    wake_up_process(curr->task);
+
+                    mutex_unlock(&groups[i].list_mutex);
+                }
+            }
+        }
+        break;
+
+        case IOCTL_TERMINATE_THREAD_BY_ID:
+            copy_ret = copy_from_user(&thread_id, (int __user *)arg, sizeof(int));
+            if(copy_ret) {
+                printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
+                return -EFAULT;
+            }
+
+            printk(MY_BLKDEV_NAME ": Received thread id %d", thread_id);
+
+            blk_thread_t* found_thread = NULL;
+            int group_id = -1;
+
+            // Remove this thread from existence (find thread that we need, then remove it from list. Stop it later.)
+            for (i = 0; i < N_GROUPS; i++) {
+                mutex_lock(&groups[i].list_mutex);
+                blk_thread_t *curr;
+                list_for_each_entry(curr, &groups[i].thread_head, thread_node) {
+                    if (curr->global_id == thread_id) {
+                        found_thread = curr;
+                        group_id = i;
+
+                        list_del_init(&curr->thread_node);
+
+                        break;
+                    }
+                }
+                mutex_unlock(&groups[i].list_mutex);
+
+                if (found_thread) break;
+            }
+
+            // Stop found thread
+            if (found_thread) {
+                if (found_thread->task && (found_thread->state == RUNNING || found_thread->state == CREATED)) {
+            
+                    int thread_stop_ret = kthread_stop(found_thread->task);
+                    if (thread_stop_ret) {
+                        printk(KERN_ERR MY_BLKDEV_NAME ": kthread_stop failed for thread %d: %d\n", thread_id, thread_stop_ret);
+                    }
+                }
+        
+                kfree(found_thread);
+            }
+            else {
+                printk(KERN_ERR MY_BLKDEV_NAME ": Thread %d not found\n", thread_id);
+                return -ENOENT;
+            }
+            break;
+
+    case IOCTL_TERMINATE_GROUP_THREADS:
+        copy_ret = copy_from_user(&type, (group_type_t __user *)arg, sizeof(group_type_t));
+        if (copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        printk(MY_BLKDEV_NAME ": Terminate threads in group %d", type);
+
+        struct list_head temp_list;
+        INIT_LIST_HEAD(&temp_list);
+
+        // Move this group to temp list
+        mutex_lock(&groups[type].list_mutex);
+
+        list_splice_init(&groups[type].thread_head, &temp_list);
+        mutex_unlock(&groups[type].list_mutex);
+
+        // Stop group threads
+        struct list_head *pos, *n;
+        list_for_each_safe(pos, n, &temp_list) {
+            blk_thread_t *curr = list_entry(pos, blk_thread_t, thread_node);
+        
+            list_del(pos);
+        
+            if (curr->task && (curr->state == RUNNING)) {
+                kthread_stop(curr->task);
+            }
+            else if (curr->task && (curr->state == CREATED)) {
+                groups[type].created_count--;
+                groups[type].terminated_count++;
+                kthread_stop(curr->task);
+            }
+
+            kfree(curr);
+        }
+        break;
+    case IOCTL_TERMINATE_ALL_THREADS:
+        // for (i = 0; i < N_GROUPS; i++) {
+        //     struct list_head temp_list;
+        //     INIT_LIST_HEAD(&temp_list);
+
+        //     mutex_lock(&groups[i].list_mutex);
+        //     list_splice_init(&groups[i].thread_head, &temp_list);
+        //     mutex_unlock(&groups[i].list_mutex);
+
+        //     struct list_head *pos, *n;
+        //     list_for_each_safe(pos, n, &temp_list) {
+        //         blk_thread_t *curr = list_entry(pos, blk_thread_t, thread_node);
+        //         list_del(pos);
+
+        //         if (curr->task && (curr->state == RUNNING)) {
+        //             kthread_stop(curr->task);
+        //         }
+        //         else if (curr->task && (curr->state == CREATED)) {
+        //             groups[type].created_count--;
+        //             groups[type].terminated_count++;
+        //             kthread_stop(curr->task);
+        //         }
+
+        //         kfree(curr);
+        //     }
+        // }
+        cleanup_threads();
+        break;
+    case IOCTL_CNT_THREADS:
+        for (i = 0; i < N_GROUPS; i++) {
+            mutex_lock(&groups[i].list_mutex);
+            th_active_cnt += groups[i].created_count;
+            th_active_cnt += groups[i].running_count;
+            mutex_unlock(&groups[i].list_mutex);
+        }
+        copy_ret = copy_to_user((int __user *)arg, &th_active_cnt, sizeof(int));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        break;
+
+    case IOCTL_CNT_RUNNING_THREADS:
+        for (i = 0; i < N_GROUPS; i++) {
+            mutex_lock(&groups[i].list_mutex);
+            th_running_cnt += groups[i].running_count;
+            mutex_unlock(&groups[i].list_mutex);
+        }
+        copy_ret = copy_to_user((int __user *)arg, &th_running_cnt, sizeof(int));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        break;
+    case IOCTL_CNT_CREATED_THREADS:
+        for (i = 0; i < N_GROUPS; i++) {
+            mutex_lock(&groups[i].list_mutex);
+            th_created_cnt += groups[i].created_count;
+            mutex_unlock(&groups[i].list_mutex);
+        }
+        copy_ret = copy_to_user((int __user *)arg, &th_created_cnt, sizeof(int));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        break;
+    case IOCTL_CNT_TERMINATED_THREADS:
+        for (i = 0; i < N_GROUPS; i++) {
+            mutex_lock(&groups[i].list_mutex);
+            th_terminated_cnt += groups[i].terminated_count;
+            mutex_unlock(&groups[i].list_mutex);
+        }
+        copy_ret = copy_to_user((int __user *)arg, &th_terminated_cnt, sizeof(int));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        break;
+    case IOCTL_CNT_RUNNING_THREADS_IN_GROUP:
+        copy_ret = copy_from_user(&type, (int __user *)arg, sizeof(int));
+        if (copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+
+        mutex_lock(&groups[type].list_mutex);
+        th_running_cnt += groups[type].running_count;
+        mutex_unlock(&groups[type].list_mutex);
+
+        copy_ret = copy_to_user((int __user *)arg, &th_running_cnt, sizeof(int));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        break;
+    case IOCTL_CNT_CREATED_THREADS_IN_GROUP:
+        copy_ret = copy_from_user(&type, (int __user *)arg, sizeof(int));
+        if (copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+
+        mutex_lock(&groups[type].list_mutex);
+        th_created_cnt += groups[type].created_count;
+        mutex_unlock(&groups[type].list_mutex);
+
+        copy_ret = copy_to_user((int __user *)arg, &th_created_cnt, sizeof(int));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        break;
+    case IOCTL_CNT_TERMINATED_THREADS_IN_GROUP:
+        copy_ret = copy_from_user(&type, (int __user *)arg, sizeof(int));
+        if (copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+
+        mutex_lock(&groups[type].list_mutex);
+        th_terminated_cnt += groups[type].terminated_count;
+        mutex_unlock(&groups[type].list_mutex);
+
+        copy_ret = copy_to_user((int __user *)arg, &th_terminated_cnt, sizeof(int));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        break;
+    case IOCTL_GET_SHARED_VARIABLE_VALUE:
+        copy_ret = copy_from_user(&type, (int __user *)arg, sizeof(int));
+        if (copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+
+        mutex_lock(&groups[type].list_mutex);
+        shared_var_user = groups[type].shared_var;
+        mutex_unlock(&groups[type].list_mutex);
+
+        copy_ret = copy_to_user((int __user *)arg, &shared_var_user, sizeof(int));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+        break;
+    case IOCTL_THREADS_INFO:
+    case IOCTL_DBG_MSG_THREADS_INFO:
+        copy_ret = copy_from_user(&thread_info, (th_info_t __user *)arg, sizeof(th_info_t));
+
+        if (copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+
+        for (i = 0; i < N_GROUPS; i++) {
+            mutex_lock(&groups[i].list_mutex);
+            thread_info.th_total += groups[i].created_count;
+            thread_info.th_running += groups[i].running_count;
+            thread_info.th_terminated += groups[i].terminated_count;
+            thread_info.th_gr_total[i] = thread_info.th_gr_total[i] ? groups[i].created_count : 0; // Only when requested
+            thread_info.th_gr_running[i] = groups[i].running_count;
+            thread_info.th_gr_terminated[i] = groups[i].terminated_count;
+            mutex_unlock(&groups[i].list_mutex);
+        }
+
+        if (cmd == IOCTL_THREADS_INFO) {
+            copy_ret = copy_to_user((th_info_t __user *)arg, &thread_info, sizeof(th_info_t));
+
+            if(copy_ret) {
+                printk(KERN_ERR MY_BLKDEV_NAME ": Copy to user failed. Return: %d", copy_ret);
+                return -EFAULT;
+            }
+        }
+        else {
+            printk(MY_BLKDEV_NAME ": Total created threads:     %d\n", thread_info.th_total);
+            printk(MY_BLKDEV_NAME ": Total running threads:     %d\n", thread_info.th_running);
+            printk(MY_BLKDEV_NAME ": Total terminated threads:  %d\n", thread_info.th_terminated);
+            for (i = 0; i < N_GROUPS; i++) {
+                printk(MY_BLKDEV_NAME ": Group %d. \n", i);
+                if (thread_info.th_gr_total[i])
+                    printk(MY_BLKDEV_NAME ": Created threads:    %d\n", thread_info.th_gr_total[i]);
+                printk(MY_BLKDEV_NAME ": Running threads:    %d\n", thread_info.th_gr_running[i]);
+                printk(MY_BLKDEV_NAME ": Terminated threads: %d\n", thread_info.th_gr_terminated[i]);
+            }
+        }
 
         break;
-    
     default:
         printk(KERN_ERR MY_BLKDEV_NAME ": Unknown IOCTL\n");
         return -ENOTTY;
@@ -129,33 +505,11 @@ static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int 
     return 0;
 }
 
-/*
-*   Main structure
-*/
-static struct my_device {
-    struct blk_mq_tag_set tag_set;
-    struct request_queue *queue;
-    struct gendisk *gd;
-} dev;
-
 static blk_status_t my_queue_rq(struct blk_mq_hw_ctx *hctx, const struct blk_mq_queue_data *bd)
 {
     blk_mq_end_request(bd->rq, BLK_STS_OK);
     return BLK_STS_OK;
 }
-
-static const struct blk_mq_ops my_queue_ops = {
-    .queue_rq = my_queue_rq,
-};
-
-// Block device ops
-struct block_device_operations my_block_ops = {
-    .owner = THIS_MODULE,
-    .open = my_block_open,
-    .release = my_block_release,
-    .ioctl = my_block_ioctl,
-    .compat_ioctl = my_block_ioctl,
-};
 
 static void groups_init(void)
 {
@@ -258,28 +612,24 @@ static int __init drv_block_init(void)
 static void cleanup_threads(void)
 {
     int i;
-    int thread_stop_ret;
     for (i = 0; i < N_GROUPS; i++) {
+        struct list_head temp_list;
+        INIT_LIST_HEAD(&temp_list);
 
-        if (list_empty(&groups[i].thread_head)) {
-            printk(KERN_INFO "Group %d already empty\n", i);
-            continue;
-        }
+        mutex_lock(&groups[i].list_mutex);
+        list_splice_init(&groups[i].thread_head, &temp_list);
+        mutex_unlock(&groups[i].list_mutex);
 
-        blk_thread_t *curr, *tmp;
-        list_for_each_entry_safe(curr, tmp, &groups[i].thread_head, thread_node) {
-            mutex_lock(&groups[i].list_mutex);
-            
-            if (curr->task && curr->state == RUNNING) {
-                thread_stop_ret = kthread_stop(curr->task);
-                printk(MY_BLKDEV_NAME ": Thread stoped. Pid: %d. Group id: %d\n", curr->global_id, curr->group_type);
+        struct list_head *pos, *n;
+        list_for_each_safe(pos, n, &temp_list) {
+            blk_thread_t *curr = list_entry(pos, blk_thread_t, thread_node);
+            list_del(pos);
+
+            if (curr->task && (curr->state == RUNNING || curr->state == CREATED)) {
+                kthread_stop(curr->task);
             }
 
-            list_del_init(&curr->thread_node);
-
             kfree(curr);
-
-            mutex_unlock(&groups[i].list_mutex);
         }
     }
 }
