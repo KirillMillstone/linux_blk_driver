@@ -22,49 +22,111 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
     printk(MY_BLKDEV_NAME ": Device released\n");
 }
 
-// int thread_func(void* data)
-// {
+int thread_func(void* data)
+{
+    blk_thread_t* curr_th = (blk_thread_t*)data; 
+    printk(MY_BLKDEV_NAME ": Thread woken up. Pid: %d. Group id: %d\n", curr_th->global_id, curr_th->group_type);
 
-// }
+    mutex_lock(&groups[curr_th->group_type].list_mutex);
+    groups[curr_th->group_type].running_count--;
+    groups[curr_th->group_type].terminated_count++;
+    curr_th->state = TERMINATED;
+    mutex_unlock(&groups[curr_th->group_type].list_mutex);
+
+    printk(MY_BLKDEV_NAME ": Thread terminated. Pid: %d. Group id: %d\n", curr_th->global_id, curr_th->group_type);
+
+    return 0;
+}
+
+static void blk_create_thread(th_create_params_t params)
+{
+    blk_thread_t* new_th = kmalloc(sizeof(blk_thread_t), GFP_KERNEL);
+    new_th->global_id = thread_cnt; // Update global variable after adding thread to list
+    new_th->group_type = params.group_id;
+    new_th->state = CREATED;    // NOT running
+
+    // Group id verified before in IOCTL handler
+    new_th->synch_obj = groups[params.group_id].group_synch_obj;
+    new_th->pshared_var = &groups[params.group_id].shared_var;
+
+    // Create thread
+    new_th->task = kthread_create(thread_func, new_th, "blk_thread_%d", thread_cnt);
+    
+    if (IS_ERR(new_th->task)) {
+        printk(KERN_ERR MY_BLKDEV_NAME " kthread_create failed\n");
+        kfree(new_th);
+        return;
+    }
+
+    mutex_lock(&groups[params.group_id].list_mutex);
+    thread_cnt++;
+    mutex_unlock(&groups[params.group_id].list_mutex);
+
+    new_th->global_id = new_th->task->pid;
+    printk(MY_BLKDEV_NAME ": Thread created. Pid: %d. Group id: %d\n", new_th->global_id, new_th->group_type);
+
+    // Add node to group list
+    mutex_lock(&groups[params.group_id].list_mutex);
+
+    list_add_tail(&new_th->thread_node, &groups[params.group_id].thread_head);
+    groups[params.group_id].created_count++;
+
+    mutex_unlock(&groups[params.group_id].list_mutex);
+
+    if (params.start && new_th->state == CREATED) {
+        mutex_lock(&groups[params.group_id].list_mutex);
+
+        new_th->state = RUNNING;
+        groups[params.group_id].created_count--;
+        groups[params.group_id].running_count++;
+
+        wake_up_process(new_th->task);
+
+        mutex_unlock(&groups[params.group_id].list_mutex);
+    }
+}
 
 static int my_block_ioctl(struct block_device *bdev, fmode_t mode, unsigned int cmd, unsigned long arg)
 {
-    int ret = 0;
+    int copy_ret = 0;
     th_create_params_t th_create_params;
     th_info_t thread_info;
+    group_type_t type;
 
     switch (cmd)
     {
+    case IOCTL_RUN_THREAD:
     case IOCTL_CREATE_THREAD:
-        copy_from_user(&th_create_params, (th_create_params_t __user *)arg, sizeof(th_create_params));
+
+        copy_ret = copy_from_user(&th_create_params, (group_type_t __user *)arg, sizeof(type));
+
+        if(copy_ret) {
+            printk(KERN_ERR MY_BLKDEV_NAME ": Copy from user failed. Return: %d", copy_ret);
+            return -EFAULT;
+        }
+
+        th_create_params.start = cmd == IOCTL_RUN_THREAD ? 1 : 0;
+
+        th_create_params.group_id = type;
+
         printk(MY_BLKDEV_NAME ": Create params: {start = %d, group_id = %d}\n", th_create_params.start, th_create_params.group_id);
 
-        blk_thread_t* th = kmalloc(sizeof(blk_thread_t), GFP_KERNEL);
-        th->state = CREATED;
-        list_add_tail(&th->thread_node, &groups[th_create_params.group_id].thread_head);
+        if (!(0 <= th_create_params.group_id && th_create_params.group_id < N_GROUPS)) {
+            printk(MY_BLKDEV_NAME ": Invalid group ID %d\n", th_create_params.group_id);
+            return -EINVAL;
+        }
 
-        // int i;
-        // for (i = 0; i < N_GROUPS; i++) {
-        //     if (!list_empty(&groups[i].thread_head)) {
-        //         struct list_head* curr;
-        //         list_for_each(curr, &groups[i].thread_head) {
-        //             blk_thread_t* tp = list_entry(curr, blk_thread_t, thread_node);
-        //             printk(MY_BLKDEV_NAME ": %d\n", tp->state);
-        //         }
-        //     }
-        //     else {
-        //         printk(MY_BLKDEV_NAME ": List %d is empty\n", i);
-        //     }
-        // }
+        blk_create_thread(th_create_params);
 
         break;
     
     default:
         printk(KERN_ERR MY_BLKDEV_NAME ": Unknown IOCTL\n");
+        return -ENOTTY;
         break;
     }
 
-    return ret;
+    return 0;
 }
 
 /*
@@ -121,6 +183,13 @@ static void groups_init(void)
     mutex_init(&group_mutex);
     sema_init(&group_sem, 1);
     spin_lock_init(&group_spinlock);
+
+    groups[GR_NOSYNCH].group_synch_obj = NULL;
+    groups[GR_MUTEX].group_synch_obj = &group_mutex;
+    groups[GR_SEM].group_synch_obj = &group_sem;
+    groups[GR_SPIN].group_synch_obj = &group_spinlock;
+
+    thread_cnt = 0;
 }
 
 /*
@@ -147,10 +216,8 @@ static int create_block_device(struct my_device *dev)
         return -ENOMEM;
     }
 
-    // dev->queue = blk_init_
     dev->gd = alloc_disk(1);
     if (!dev->gd) {
-        // blk_cleanup_queue(my_device.queue);
         printk(KERN_NOTICE "Alloc disk failed\n");
         unregister_blkdev(block_major, MY_BLKDEV_NAME);
         return -ENOMEM;
@@ -160,7 +227,6 @@ static int create_block_device(struct my_device *dev)
     dev->gd->first_minor    = 0;
     dev->gd->fops           = &my_block_ops;
     dev->gd->queue          = dev->queue;
-    // dev->gd->flags          = GENHD_FL_NO_PART_SCAN;
     dev->gd->private_data   = dev;
     strcpy(dev->gd->disk_name, MY_BLKDEV_NAME);
     set_capacity(dev->gd, NR_SECTORS);
@@ -192,6 +258,7 @@ static int __init drv_block_init(void)
 static void cleanup_threads(void)
 {
     int i;
+    int thread_stop_ret;
     for (i = 0; i < N_GROUPS; i++) {
 
         if (list_empty(&groups[i].thread_head)) {
@@ -201,7 +268,18 @@ static void cleanup_threads(void)
 
         blk_thread_t *curr, *tmp;
         list_for_each_entry_safe(curr, tmp, &groups[i].thread_head, thread_node) {
+            mutex_lock(&groups[i].list_mutex);
+            
+            if (curr->task && curr->state == RUNNING) {
+                thread_stop_ret = kthread_stop(curr->task);
+                printk(MY_BLKDEV_NAME ": Thread stoped. Pid: %d. Group id: %d\n", curr->global_id, curr->group_type);
+            }
+
             list_del_init(&curr->thread_node);
+
+            kfree(curr);
+
+            mutex_unlock(&groups[i].list_mutex);
         }
     }
 }

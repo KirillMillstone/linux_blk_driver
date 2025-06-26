@@ -21,8 +21,8 @@ typedef struct {
     unsigned int th_gr_terminated[N_GROUPS];
 } th_info_t;
 
-#define IOCTL_CREATE_THREAD                     _IOW    (BLKDRV_MAGIC, 0xb0, th_create_params_t) 
-#define IOCTL_RUN_THREAD                        _IOW    (BLKDRV_MAGIC, 0xb1, th_create_params_t)
+#define IOCTL_CREATE_THREAD                     _IOW    (BLKDRV_MAGIC, 0xb0, group_type_t) 
+#define IOCTL_RUN_THREAD                        _IOW    (BLKDRV_MAGIC, 0xb1, group_type_t)
 #define IOCTL_START_THREAD_BY_ID                _IOW    (BLKDRV_MAGIC, 0xb2, int)
 #define IOCTL_START_THREADS                     _IO     (BLKDRV_MAGIC, 0xb3)
 #define IOCTL_TERMINATE_THREAD_BY_ID            _IOW    (BLKDRV_MAGIC, 0xb4, int)
